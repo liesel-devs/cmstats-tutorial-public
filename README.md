@@ -10,6 +10,7 @@ You can find more on the tutorial on the [conference website](http://www.cmstati
 
 - For low-level support, you can contact Johannes Brachem `brachem@uni-goettingen.de`
 - Please also feel encouraged to ask questions on our discussion board: https://github.com/liesel-devs/liesel/discussions
+- Liesel documentation: https://docs.liesel-project.org/en/latest/
 
 ## Getting started with Google Colab
 
