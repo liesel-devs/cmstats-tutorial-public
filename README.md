@@ -6,6 +6,10 @@ This is a public repository for sharing materials with participants of the Liese
 
 You can find more on the tutorial on the [conference website](http://www.cmstatistics.org/CMStatistics2023/tutorials.php).
 
+## Support
+
+- For low-level support, you can contact Johannes Brachem `brachem@uni-goettingen.de`
+- Please also feel encouraged to ask questions on our discussion board: https://github.com/liesel-devs/liesel/discussions
 
 ## Getting started with Google Colab
 
