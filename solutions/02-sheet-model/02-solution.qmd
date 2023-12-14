@@ -1,0 +1,645 @@
+---
+title: Solutions Sheet 02
+format: 
+  html:
+    standalone: true
+    toc: true
+execute: 
+  cache: true
+  echo: fenced
+engine: knitr
+---
+
+{{< include ../math.qmd >}}
+
+\solution{02}
+
+
+On Google Colab, you can install the required libraries with the following
+commands:
+
+```
+!apt install libgraphviz-dev
+!pip install pygraphviz
+!pip install liesel
+!pip install plotnine
+```
+
+## Exercise 1: Statistical models as directed acyclic graphs
+
+- To get an overview of a statistical model, it can be helpful to
+represent them as directed acyclic graphs. In our usage, they consist of two main building blocks:
+    - Nodes: The variables that come up in the model
+    - Edges: The connections between the variables. These edges are directed, that means they represent the flow of information from one node to another.
+    - The graph is **acyclic**, which means no node can become it's own input (or the input to its inputs).
+
+We differentiate nodes based on two concepts:
+
+- **Strong** and **weak** nodes: Strong nodes introduce new information into the graph, while weak nodes are deterministically calculated from other nodes in the graph.
+- **Random** and **nonrandom** nodes. Nodes with an associated probability distribution are random. Other nodes are nonrandom.
+
+We also differentiate between two types of edges:
+
+- Used in **value**: For edges that represent the flow of information as inputs for deterministic computations.
+- Used in **distribution**: For edges that represent the flow of information as inputs to probability distributions.
+
+### Subtask a): The first graph
+
+In this model, we have the following nodes:
+
+- $\text{rent}$: The observed values and observation model for our response variable.
+  - This node is *strong*, because the observed values enter the graph with this node - they are not calculated.
+  - This node is *random*, because it has an associated probability distribution.
+- $\mu$: The mean of the response distribution.
+  - This node is *strong*, because the value of $\mu$ enters the graph with this node.
+  - This node is *nonrandom*, because it does not have a probability distribution.
+- $\sigma^2$: The variance of the response distribution.
+  - This node is *strong*, because the value of $\sigma^2$ enters the graph with this node.
+  - This node is *nonrandom*, because it does not have a probability distribution.
+- $\sigma$: The scale of the response distribution. We include it here mainly for illustration.
+  - This node is *weak*, because the value of $\sigma$ is calculated as the square root of $\sigma^2$.
+  - This node is *nonrandom*, because it does not have a probability distribution.
+
+
+![](img/ex01-a-graph.png)
+
+
+### Subtask b): Adding a regression model
+
+In this model, we observe the following changes:
+
+- $\beta_0$: The model intercept is added as a new node.
+  - This node is *strong*, because the value of $\beta_0$ enters the graph with this node.
+  - This node is *nonrandom*, because it does not have a probability distribution.
+- $\beta_1$: The regression coefficient for the covariate $\text{area}$ is added as a new node.
+  - This node is *strong*, because the value of $\beta_0$ enters the graph with this node.
+  - This node is *nonrandom*, because it does not have a probability distribution.
+- $\text{area}$: The observed values of the covariate $\text{area}$
+  - This node is *strong*, because the values of $\text{area}$ enter the graph with this node.
+  - This node is *nonrandom*, because it does not have a probability distribution.
+- $\mu$: The mean of the response distribution is now a deterministic function of
+  other nodes in the graph through the model $\mu_i = \beta_0 + \beta_1 \text{area}_i$. 
+  Thus, it changes from a strong node into a *weak* node. It remains a nonrandom node.
+
+
+![](img/ex01-b-graph.png)
+
+### Subtask c): Adding a prior
+
+In this model, we observe the following changes:
+
+- $\sigma^2$: The variance of the response distribution now has its own 
+  probability distribution, the inverse gamma prior, so that it changes from
+  a nonrandom to a *random* node. It remains a strong node.
+- $a$: The prior shape (=concentration) of the inverse gamma prior for $\sigma^2$.
+  - This node is *strong*, because the value of $a$ enters the graph with this node.
+  - This node is *nonrandom*, because it does not have a probability distribution.
+- $b$: The prior scale of the inverse gamma prior for $\sigma^2$.
+  - This node is *strong*, because the value of $b$ enters the graph with this node.
+  - This node is *nonrandom*, because it does not have a probability distribution.
+
+
+![](img/ex01-c-graph.png)
+
+
+## Exercise 2: Your first Liesel model
+
+Liesel is built with the graph representation in mind, providing you the
+basic building blocks. The four fundamental blocks are:
+
+- `lsl.Var`: A statistical variable, always shows up in the model graph. 
+   - A `lsl.Var` object is *strong* and *nonrandom* by default. 
+   - It can be associated with a probability distribution via `lsl.Dist`, making it *random*.
+   - It can wrap a function via `lsl.Calc`, making it *weak*.
+- `lsl.Dist`: Wraps a probability distribution.
+- `lsl.Calc`: Wraps a function. 
+   - Shows up in the model graph only if wrapped by a `lsl.Var`.
+- `lsl.Data`: Holds constant auxiliary data, for example for storing values that
+   are precomputed for convenience or efficiency, but not of major modeling
+   interest.
+
+Liesel also provides two convenience functions:
+
+- `lsl.obs`: Initializes a `lsl.Var` and sets the `lsl.Var.observed` flag to `True`. 
+   This makes sure that, if the variable is random, its log probability/density
+   is added to the model's log likelihood.
+- `lsl.param`: Initializes a `lsl.Var` and sets the `lsl.Var.parameter` flag to
+   `True`. This makes sure that, if the variable is random, its log 
+   probability/density is added to the model's log prior.
+
+
+
+### Exercise 2a): A minimal model
+
+First, we import the data. Here, we transform the values directly to the 
+data type `float32`, since JAX works with 32-bit floats. Liesel would also
+convert these values automatically, but we like to be explicit here.
+
+
+```{python}
+import pandas as pd
+
+rent99 = pd.read_csv("https://s.gwdg.de/mzAkHV")
+area = rent99.area.to_numpy("float32")
+rent = rent99.rent.to_numpy("float32")
+```
+
+Next, we set up the leaf nodes. Even though they are not random, we initialize
+the mean and variance as parameters. Both receive a value and a name.
+
+```{python}
+import liesel.model as lsl
+
+mu = lsl.param(0.0, name="mu")
+sigma_sq = lsl.param(10.0, name="sigma_sq")
+```
+
+Next, we use our first calculator. The `lsl.Calc` class receives the function
+to execute as its first argument, followed by the inputs. We use pure,
+jittable functions in `lsl.Calc` objects, and can very often simply resort
+to using functions available from `jax.numpy`.
+
+We wrap the calculator in a `lsl.Var`, because we want the `"sigma"` node to 
+show up in the model graph.
+
+```{python}
+import jax.numpy as jnp
+
+sigma = lsl.Var(
+  lsl.Calc(jnp.sqrt, sigma_sq), name="sigma"
+)
+```
+
+Next, we set up the response node with its probability distribution. We actually
+start with the distribution. The `lsl.Dist` class wraps probability distributions
+that follow the `tensorflow_probability` interface.
+The `lsl.Dist` instance
+is then fed as the second argument to `lsl.obs`.
+
+
+```{python}
+import tensorflow_probability.substrates.jax.distributions as tfd
+
+y_dist = lsl.Dist(tfd.Normal, loc=mu, scale=sigma)
+y = lsl.obs(rent, y_dist, name="rent")
+```
+
+Our first model is almost complete. We bring everything together by initializing
+a `lsl.GraphBuilder` and adding our response node. Since all other nodes in the
+graph can be found as inputs to this response node, we only need the 
+GraphBuilder to know about this one. All other nodes will be found 
+automatically. We finish this task by building our model and plotting our graph.
+
+```{python}
+gb = lsl.GraphBuilder().add(y)
+
+model = gb.build_model()
+lsl.plot_vars(model)
+```
+
+We can inspect the log probability, log likelihood and log prior of the
+fully built model:
+
+```{python}
+print(model.log_prob)
+print(model.log_lik)
+print(model.log_prior)
+```
+
+
+We can inspect the log probability/density of all of our variables:
+
+```{python}
+print(mu.log_prob)
+print(sigma_sq.log_prob)
+print(sigma.log_prob)
+print(y.log_prob) # 
+print(y.log_prob.sum())
+```
+
+### Exercise 2b): Adding a regression model
+
+The main difference here lies in the way we define the response's mean. 
+We have three new nodes: the observed values of $\text{area}$, the
+intercept $\beta_0$ and the coefficient $\beta_1$.
+
+We then define $\mu$ as the output of a short function and wrap it with 
+a `lsl.Calc` and a `lsl.Var`.
+
+```{python}
+x = lsl.obs(area, name="area")
+
+b0 = lsl.param(0.0, name="b0")
+b1 = lsl.param(0.0, name="b1")
+
+def linear_model(x, b0, b1):
+    return b0 + x*b1
+
+mu = lsl.Var(
+  lsl.Calc(linear_model, x=x, b0=b0, b1=b1), name="mu"
+)
+```
+
+The rest of the model stays the same, so we can copy from above:
+
+```{python}
+sigma_sq = lsl.param(10.0, name="sigma_sq")
+sigma = lsl.Var(lsl.Calc(jnp.sqrt, sigma_sq), name="sigma")
+
+y_dist = lsl.Dist(tfd.Normal, loc=mu, scale=sigma)
+y = lsl.obs(rent, y_dist, name="rent")
+
+gb = lsl.GraphBuilder().add(y)
+model = gb.build_model()
+lsl.plot_vars(model)
+```
+
+### Exercise 2c): Adding a prior
+
+The main difference here lies in the way we define the response's variance.
+That is, we now set up a prior for the `sigma_sq` node.
+
+```{python}
+a = lsl.Var(0.01, name="a")
+b = lsl.Var(0.01, name="b")
+
+sigma_sq_dist = lsl.Dist(tfd.InverseGamma, concentration=a, scale=b)
+sigma_sq = lsl.param(1.0, sigma_sq_dist, name="sigma_sq")
+
+sigma = lsl.Var(lsl.Calc(jnp.sqrt, sigma_sq), name="sigma")
+```
+
+The rest of the model stays the same, so we can copy from above:
+
+```{python}
+x = lsl.obs(area, name="area")
+
+b0 = lsl.param(0.0, name="b0")
+b1 = lsl.param(0.0, name="b1")
+
+def linear_model(x, b0, b1):
+    return b0 + x*b1
+
+mu = lsl.Var(lsl.Calc(linear_model, x=x, b0=b0, b1=b1), name="mu")
+
+y_dist = lsl.Dist(tfd.Normal, loc=mu, scale=sigma)
+y = lsl.obs(rent, y_dist, name="rent")
+
+gb = lsl.GraphBuilder().add(y)
+model = gb.build_model()
+lsl.plot_vars(model)
+```
+
+We can inspect the log probability, log likelihood and log prior of the
+fully built model:
+
+```{python}
+print(model.log_prob)
+print(model.log_lik)
+print(model.log_prior)
+```
+
+
+We can inspect the log probability/density of all of our variables:
+
+```{python}
+print(mu.log_prob)
+print(sigma_sq.log_prob)
+print(sigma.log_prob)
+print(y.log_prob) # 
+print(y.log_prob.sum())
+```
+
+## Exercise 3: Manipulate a Graph
+
+### Exercise 3a): Update existing prior
+
+We can simply override the `lsl.Var.value` attribute of the relevant nodes.
+
+```{python}
+print(model.log_prob)
+a.value = 2.0
+b.value = 0.5
+print(model.log_prob)
+```
+
+### Exercise 3b): Replace existing prior
+
+- A `lsl.Model` object assumes a static graph. That means, the values of nodes
+  can change, but the nodes themselves stay fixed.
+- To update the graph, we therefore extract the nodes and variables from our
+  model and set up a new graph using our response node.
+
+```{python}
+_, vars_ = model.pop_nodes_and_vars()
+
+gb = lsl.GraphBuilder().add(vars_["rent"])
+gb.plot_vars()
+```
+
+Note that we are replacing a weak, nonrandom `lsl.Var` with a strong, random `lsl.Var`.
+- the existing $\sigma$ is weak and nonrandom, because it is the square root
+  of the strong, random node $\sigma^2$.
+- the new $\sigma$ node will be strong and random, because we include it 
+  directly without referring to $\sigma^2$, and because we place the prior
+  directly on $\sigma$.
+
+```{python}
+hc_prior_scale = lsl.Var(25.0, name="hc_prior_scale")
+
+sigma_dist = lsl.Dist(tfd.HalfCauchy, loc=0.0, scale=hc_prior_scale)
+
+sigma_hc = lsl.param(1.0, sigma_dist, name="sigma_hc")
+```
+    
+
+The GraphBuilder then allows us to replace the node in question.
+
+```{python}
+gb.replace_var(sigma, sigma_hc)
+gb.plot_vars()
+```
+
+### Exercise 3c): Transform a parameter
+
+- To transform a parameter, we again use functionality offered by TensorFlow, namely
+its bijector interface. 
+- It offers a wide range of useful bijective functions that we can use a inverse link functions. 
+- The bijectors are named after their "forward" transformation, i.e. the *inverse* link function.
+- In this case, since we want to use a logarithmic transformation of the parameter $\sigma$,
+  we need the `Exp` bijector.
+- The `lsl.GraphBuilder` offers the function `lsl.GraphBuilder.transform`, which
+  will... 
+  
+  i) ... create the new transformed node and turns the original node into an 
+     appropriate calculator node to hold the output of the calculation.
+  ii) ... automatically apply the change-of-variables theorem for us such that 
+     the prior will be defined for the transformed variable.
+  
+```{python}
+import tensorflow_probability.substrates.jax.bijectors as tfb
+
+gb.transform(sigma_hc, tfb.Exp)
+gb.plot_vars()
+```
+
+
+## Exercise 4: Sample from the posterior using Goose
+
+Here, we apply the knowledge from Exercise Sheet 01.
+
+```{python}
+model = gb.build_model()
+interface = gs.LieselInterface(model)
+
+eb = gs.EngineBuilder(seed=1, num_chains=4)
+eb.add_kernel(gs.NUTSKernel(["b0", "b1"]))
+eb.add_kernel(gs.IWLSKernel(["sigma_hc_transformed"]))
+
+eb.set_duration(warmup_duration=1000, posterior_duration=1000)
+eb.set_model(interface)
+eb.set_initial_values(model.state)
+eb.set_engine_seed(seed=2)
+
+engine = eb.build()
+```
+
+```{python}
+engine.sample_all_epochs()
+```
+
+```{python}
+results = engine.get_results()
+gs.Summary(results)
+```
+
+```{python}
+gs.plot_trace(results)
+```
+
+## Exercise 5: A semiparametric model in Liesel
+
+### Subtask a): Bayesian P-spline
+
+We start by representing $s(\text{area}_i)$ with B-spline bases of order $3$
+and spline coefficients $\beta_1, \dots, \beta_J$:
+$$
+s(\text{area}_i) = \sum_{j=1}^J B_j(\text{area}_i)\beta_j.
+$$
+For the spline coefficients $\bsbeta = [\beta_1, \dots, \beta_J]^T$, we define a second-order random walk prior,
+which is a partially improper multivariate normal prior of the form
+$$
+f(\bsbeta | \tau^2) \propto \left(\frac{1}{\tau^2}\right)^{(L-2)/2}\exp \left( - \frac{1}{2 \tau^2} \bsbeta^T \bfK \bsbeta \right).
+$$
+Here, the penalty matrix $\bfK$ is defined as the crossproduct of a 
+second-differences matrix $\bfD$ of dimension  $(J-2) \times J$, so that 
+$\bfK = \bfD^T\bfD$ with
+$$
+\bfD = 
+\begin{bmatrix}
+1 & -2 & 1 & 0 &\cdots & 0 \\
+0 & 1 & -2 &1 &\ddots  &  \vdots\\
+\vdots&\ddots&\ddots& \ddots &\ddots & 0\\
+0 & \cdots & 0 & 1 & -2 &1
+\end{bmatrix}.
+$$
+The setup is completed by defining a hyperprior for the variance of the random
+walk, the inverse smoothing parameter $\tau^2$. Here, we choose an inverse 
+gamma prior:
+$$
+\tau^2 \sim \mathcal{IG}(0.01, 0.01).
+$$
+
+### Subtask b): Model graph
+
+This is the model graph:
+
+![](img/ex05-graph.png)
+
+
+### Subtask c): Implementation in Liesel
+
+#### Spline coefficient subgraph
+
+Let us start with the subgraph that represents $\bsbeta$. First, we define
+the hyperprior for $\tau^2$:
+
+```{python}
+a = lsl.Var(0.01, name="a_tau")
+b = lsl.Var(0.01, name="b_tau")
+tau_sq_prior = lsl.Dist(tfd.InverseGamma, concentration=a, scale=b)
+tau_sq = lsl.param(10.0, tau_sq_prior, name="tau_sq")
+```
+
+Next, we construct the penalty matrix $\bfK$.
+
+```{python}
+nparam = 20
+D = jnp.diff(jnp.eye(nparam), n=2, axis=0)
+K = D.T @ D
+```
+
+Now we can set up the partially improper normal prior:
+
+```{python}
+from liesel.distributions import MultivariateNormalDegenerate
+
+beta_prior = lsl.Dist(
+  MultivariateNormalDegenerate.from_penalty, loc=0.0, var=tau_sq, pen=K
+)
+```
+
+Finally, we can set up the $\bsbeta$ node, bringing everything together.
+
+```{python}
+beta = lsl.param(jnp.zeros(20), beta_prior, name="beta")
+```
+
+#### Location subgraph
+
+Next, we import the prepared matrix of basis function evaluations using numpy.
+We also create a `lsl.Var` that holds the basis matrix.
+
+```{python}
+import numpy as np
+basis_matrix = np.loadtxt("https://s.gwdg.de/LZnQMC")
+
+area_basis = lsl.obs(basis_matrix, name="area_basis")
+```
+
+Next, we include the location calculator. This calculator implements
+$$
+\bss(\mathbf{area}) = \bfB \bsbeta,
+$$
+where $\bfB$ is the matrix of basis function evaluations.
+```{python}
+mu = lsl.Var(
+  lsl.Calc(jnp.dot, area_basis, beta), name="mu"
+)
+```
+
+#### Scale subgraph
+
+This is just an application of what we did earlier.
+
+```{python}
+a_sigma = lsl.Var(0.01, name="a_sigma")
+b_sigma = lsl.Var(0.01, name="b_sigma")
+sigma_sq_dist = lsl.Dist(tfd.InverseGamma, concentration=a_sigma, scale=b_sigma)
+sigma_sq = lsl.param(10.0, sigma_sq_dist, name="sigma_sq")
+sigma = lsl.Var(lsl.Calc(jnp.sqrt, sigma_sq), name="sigma")
+```
+
+#### Response
+
+Everything now comes together in the response node.
+
+```{python}
+y_dist = lsl.Dist(tfd.Normal, loc=mu, scale=sigma)
+y = lsl.obs(rent, y_dist, name="rent")
+```
+
+```{python}
+gb = lsl.GraphBuilder().add(y)
+model = gb.build_model()
+lsl.plot_vars(model)
+```
+
+
+#### Model
+
+We finally build the model.
+
+```{python}
+model.pop_nodes_and_vars()
+
+gb = lsl.GraphBuilder().add(y)
+gb.transform(tau_sq, tfb.Exp)
+gb.transform(sigma_sq, tfb.Exp)
+model = gb.build_model()
+lsl.plot_vars(model)
+```
+
+### Subtask d): Setting up the sampling engine
+
+Setting up the engine works pretty much like in the earlier examples.
+Just don't forget that $\tau^2$ and $\sigma^2$ are sampled 
+after transformation here, so we have to append `"_transformed"` to the
+respective node names.
+
+```{python}
+eb = gs.EngineBuilder(seed=10, num_chains=4)
+
+eb.add_kernel(gs.NUTSKernel(["beta", "tau_sq_transformed"]))
+eb.add_kernel(gs.NUTSKernel(["sigma_sq_transformed"]))
+
+eb.set_duration(warmup_duration=1000, posterior_duration=1000)
+eb.set_model(gs.LieselInterface(model))
+eb.set_initial_values(model.state)
+
+engine = eb.build()
+```
+
+After the engine has been set up, the sample from all epochs.
+
+```{python}
+engine.sample_all_epochs()
+```
+
+Let's take a first look at the summary.
+
+```{python}
+results = engine.get_results()
+summary = gs.Summary(results)
+summary
+```
+
+### Subtask e): Trace plots
+
+The trace plots look quite encouraging.
+
+```{python}
+gs.plot_trace(results, "beta", range(0, 9))
+gs.plot_trace(results, "beta", range(9, 20))
+gs.plot_param(results, "tau_sq_transformed")
+gs.plot_param(results, "sigma_sq_transformed")
+```
+
+### Subtask f): Plotting the posterior mean function
+
+The summary object gives us access to a number of useful summary statistics.
+We can see the names by printing out the keys of the `gs.Summary.quantities`
+dictionary.
+
+```{python}
+list(summary.quantities)
+```
+
+We can use these summary statistics to extract some values for plotting. In 
+addition to the mean, we use the highest posterior density interval here
+to quantify uncertainty.
+
+```{python}
+beta_mean = summary.quantities["mean"]["beta"]
+beta_hdi = summary.quantities["hdi"]["beta"]
+
+s_mean = basis_matrix @ beta_mean
+s_hdi_lo = basis_matrix @ beta_hdi[0,:]
+s_hdi_hi = basis_matrix @ beta_hdi[1,:]
+```
+
+For plotting, we can use the Python library `plotnine`, which practically
+ports `ggplot2` from R to Python:
+
+```{python}
+from plotnine import ggplot, aes, geom_line, geom_ribbon
+
+(
+  ggplot()
+  + aes(area, s_mean)
+  + geom_line()
+  + geom_ribbon(aes(ymin = s_hdi_lo, ymax = s_hdi_hi), alpha = 0.2)
+)
+```
+
+
