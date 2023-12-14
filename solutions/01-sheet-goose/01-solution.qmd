@@ -1,0 +1,95 @@
+---
+format: html
+---
+
+\solution{01}
+
+## Sheet 01 - Solution
+
+First, we import the Python libraries we need to solve the exercise and define the same data and log unnormalized posterior as in Exercise 2 on Sheet 00.
+
+```{python}
+from typing import NamedTuple, TypeAlias
+from functools import partial
+
+import jax
+import jax.numpy as jnp
+import tensorflow_probability.substrates.jax as tfp
+
+import liesel.goose as gs
+
+Array: TypeAlias = jax.Array
+```
+
+```{python}
+key = jax.random.PRNGKey(0)
+mu = -1.4
+sigma = 0.8
+n = 10
+
+dist = tfp.distributions.Normal(mu, 0.8**2)
+obs = dist.sample(n, seed=key)
+
+class Params2(NamedTuple):
+    mu: float
+    log_sigma: float
+    
+def log_prior2(params: Params2) -> Array:
+    sigma = jnp.exp(params.log_sigma)
+    lp_mu = tfp.distributions.Normal(0, 10).log_prob(params.mu,)
+    lp_sigma =  tfp.distributions.HalfCauchy(0, 1).log_prob(sigma) + params.log_sigma
+    return lp_mu + lp_sigma
+
+def log_likelihood2(params: Params2, obs: Array) -> Array:
+    sigma = jnp.exp(params.log_sigma)
+    dist = tfp.distributions.Normal(params.mu, sigma)
+    lps = dist.log_prob(obs)
+    return jnp.sum(lps)
+
+def log_uposterior2(params: Params2, obs: Array) -> Array:
+    return log_prior2(params) + log_likelihood2(params, obs)
+```
+
+Next, we set up the sampler with Goose.
+
+```{python}
+# the partial application returns a function that only takes the parameters
+model_log_prob = partial(log_uposterior2, obs=obs)
+
+builder = gs.EngineBuilder(seed=0, num_chains=3)
+interface = gs.NamedTupleInterface(model_log_prob)
+builder.set_model(interface)
+builder.set_initial_values(Params2(0.0, 0.0))
+builder.set_duration(warmup_duration=500, posterior_duration=1000)
+builder.add_kernel(
+    gs.HMCKernel(["mu", "log_sigma"])
+)
+engine = builder.build()
+```
+
+Then, we can sample:
+
+```{python}
+engine.sample_all_epochs()
+```
+
+Above, we see some of Goose output. It tells us, when it enters a new epoch and how many errors have been encountered during sampling in this Epoch. The term error, can also refer to a warning that the transition kernel issues. 
+
+Goose also provides tools to summarize the results, including summaries of the errors and plots for diagnostics. Compared with Sheet 00, we have here a posterior mean estimate and uncertainty quantification. In the error summary table, we find that all errors referred to divergent transition during warmup. This is expected to happen during the auto-tuning phases of the HMC sampler.
+
+```{python}
+results = engine.get_results()
+gs.Summary(results)
+```
+
+```{python}
+gs.plot_trace(results)
+gs.plot_density(results)
+```
+
+Since we have specified the model in terms of $\log(\sigma)$ instead of $\sigma$, we get the estimates also for this quantity. We are usually interested in the those values for $\sigma$. Just applying $\exp$ to the posterior summaries is not valid. Instead, we apply the transformation to all posterior samples and include them in the summary. When using Liesel's model library, this transformation will be simpler.
+
+```{python}
+additional_chain = {'sigma': jnp.exp(results.get_posterior_samples()['log_sigma'])}
+gs.Summary(results, additional_chain=additional_chain)
+```
