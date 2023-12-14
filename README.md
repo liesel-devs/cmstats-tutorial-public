@@ -47,3 +47,9 @@ command:
 - 11:00 - 11:30 Coffee break
 - 11:30 - 13:30 Exercises: Integrating Python and R with Quarto and Reticulate (Hannes)
 - 13:30 - 15:00 Lunch break
+
+
+## Questions and Answers
+
+- My Liesel graphs always look a little random; they are not nicely ordered. What's wrong?
+    - You get nice ordering if you install graphviz and its Python interface Pygraphviz. See here: https://github.com/pygraphviz/pygraphviz
