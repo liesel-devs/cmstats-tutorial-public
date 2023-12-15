@@ -1,0 +1,542 @@
+---
+title: Solutions Sheet 03
+format: 
+  html:
+    standalone: true
+    toc: true
+execute: 
+  cache: false
+  echo: fenced
+engine: knitr
+---
+
+{{< include ../math.qmd >}}
+
+\solution{03}
+
+On Google Colab, you can install the required libraries with the following
+commands:
+
+```
+!apt install libgraphviz-dev
+!pip install pygraphviz
+!pip install liesel
+!pip install plotnine
+```
+
+
+## Exercise 1: A Location-Scale Regression Model
+
+We start by loading the data and importing the relevant libraries.
+
+```{python}
+import pandas as pd
+import tensorflow_probability.substrates.jax.distributions as tfd
+import tensorflow_probability.substrates.jax.bijectors as tfb
+import jax.numpy as jnp
+import liesel.model as lsl
+import liesel.goose as gs
+
+rent99 = pd.read_csv("https://s.gwdg.de/mzAkHV")
+
+area = rent99.area.to_numpy("float32")
+rent = rent99.rent.to_numpy("float32")
+```
+
+
+What is different about this model is the fact that we are defining a covariate
+model for the scale of the response.
+
+```{python}
+# Observed covariate values
+x = lsl.obs(area, name="area")
+
+g0 = lsl.param(0.0, name="g0")
+g1 = lsl.param(0.0, lsl.Dist(tfd.Normal, loc=0., scale=10.), name="g1")
+
+def linear_model(x, intercept, slope):
+    return intercept + x*slope
+
+log_sigma = lsl.Var(
+  lsl.Calc(linear_model, x=x, intercept=g0, slope=g1), 
+  name="log_sigma"
+)
+
+sigma = lsl.Var(lsl.Calc(jnp.exp, log_sigma), name="sigma")
+```
+
+The rest works the same as before.
+
+```{python}
+# Location Model
+b0 = lsl.param(0.0, name="b0")
+b1 = lsl.param(0.0, lsl.Dist(tfd.Normal, loc=0., scale=10.), name="b1")
+
+mu = lsl.Var(lsl.Calc(linear_model, x=x, intercept=b0, slope=b1), name="mu")
+
+# Observation Model
+y_dist = lsl.Dist(tfd.Normal, loc=mu, scale=sigma)
+y = lsl.obs(rent, y_dist, name="rent")
+
+# Build Graph & Plot
+gb = lsl.GraphBuilder().add(y)
+gb.plot_vars()
+```
+
+Sampling from the posterior using Goose also works the same as before.
+The only difference here is that we have to think of sampling the regression
+coefficients of the scale model instead of sampling the log variance directly.
+
+
+```{python}
+model = gb.build_model()
+interface = gs.LieselInterface(model)
+
+eb = gs.EngineBuilder(seed=1, num_chains=4)
+eb.add_kernel(gs.NUTSKernel(["b0", "b1"]))
+eb.add_kernel(gs.IWLSKernel(["g0", "g1"]))
+
+eb.set_duration(warmup_duration=1000, posterior_duration=1000)
+eb.set_model(interface)
+eb.set_initial_values(model.state)
+eb.set_engine_seed(seed=2)
+
+engine = eb.build()
+```
+
+After building the engine, it's time to sample and then summarize.
+
+```{python}
+#| cache: true
+engine.sample_all_epochs()
+results = engine.get_results()
+summary = gs.Summary(results)
+```
+
+```{python}
+print(summary.to_dataframe())
+print(summary.error_df())
+```
+
+
+Let's have a quick look at the trace plots for $\beta_1$ and $\gamma_1$.
+
+```{python}
+gs.plot_param(results, "b1")
+gs.plot_param(results, "g1")
+```
+
+
+## Exercise 2: A semiparametric model with `{rliesel}`
+
+### Subtask a): Plotting the dataset
+
+We import the data and, like before, use `plotnine` for plotting.
+
+```{python}
+from plotnine import ggplot, aes, geom_line, geom_point, geom_ribbon, labs
+
+mcycle = pd.read_csv("https://s.gwdg.de/50F2v6")
+
+(
+  ggplot(mcycle)
+  + aes("times", "accel")
+  + geom_point()
+)
+```
+
+
+
+### Subtask b): Set up an `rliesel` model
+
+- Rliesel offers a syntax interface that is very similar to the common modeling
+interfaces in R. 
+- Notably, we can use `mgcv` functionality to define smooth functions with the function `s()`. See `?s` for help on this function.
+- Under the hood, Liesel will set up a default distributional regression 
+  configuration including priors for us.
+  
+The R code is:
+
+```{r}
+library(rliesel)
+library(reticulate)
+```
+
+```{r}
+mcycle <- py$mcycle
+```
+
+```{r}
+model <- liesel(
+  
+  response = mcycle$accel,
+  distribution = "Normal",
+  
+  predictors = list(
+    loc = predictor(~s(times, bs = "ps", k=20), inverse_link = "Identity"),
+    scale = predictor(~1, inverse_link = "Exp")
+  ),
+  
+  data = mcycle
+)
+```
+
+
+```{{python}}
+#| include: false
+#| echo: false
+model = r.model
+lsl.save_model(model, "ex2-model.pickle")
+```
+
+In pure Python, we import a prepared model object from the public tutorial
+repoository.
+
+```{python}
+from urllib.request import urlopen
+import dill
+
+model = dill.load(urlopen("https://s.gwdg.de/un4W29"))
+
+# model = lsl.load_model("path/to/model.pickle")
+```
+
+### Subtask c): Plot the model
+
+Let's plot the model.
+
+```{python}
+lsl.plot_vars(model, save_path="img/loc.png")
+```
+
+### Subtask d): Default sampling scheme
+
+Describe the default sampling scheme for a semi-parametric distributional regression model, i.e. the different kernels for the different parameters.
+
+```{python}
+#| echo: false
+engine_builder = lsl.dist_reg_mcmc(model, seed=1337, num_chains=4)
+engine_builder.set_duration(warmup_duration=1000, posterior_duration=1000)
+
+params = [name for name, var in model.vars.items() if var.parameter]
+
+kernel_idx = []
+kernel_cls = []
+
+for param in params:
+    for i, kernel in enumerate(engine_builder.kernels):
+        if param in kernel.position_keys:
+            kernel_idx.append(i)
+            kernel_cls.append(kernel.__class__.__name__)
+
+pd.DataFrame({
+    "param": params,
+    "kernel_idx": kernel_idx,
+    "kernel_cls": kernel_cls,
+})
+```
+
+
+### Subtask e): Draw posterior samples
+
+For a default distributional regression model, Liesel ships the convenience
+function `lsl.dist_reg_mcmc`, which sets up a fully prepared `gs.EngineBuilder`
+for us to use.
+
+```{python}
+engine_builder = lsl.dist_reg_mcmc(model, seed=1337, num_chains=4)
+engine_builder.set_duration(warmup_duration=1000, posterior_duration=1000)
+```
+
+For easier plotting later on, we tell Goose to include the values of the
+`"loc"` node in the posterior samples.
+
+
+```{python}
+engine_builder.positions_included.append("loc")
+```
+
+Now we run the sampling scheme.
+
+```{python}
+#| cache: true
+engine = engine_builder.build()
+engine.sample_all_epochs()
+```
+
+
+### Subtask f): Inspect results
+
+```{python}
+results = engine.get_results()
+summary = gs.Summary(results)
+```
+
+```{python}
+print(summary.to_dataframe())
+print(summary.error_df())
+```
+
+Some trace plots:
+
+```{python}
+gs.plot_trace(results, "loc_np0_beta", range(0, 9))
+gs.plot_trace(results, "loc_np0_beta", range(9, 19))
+```
+
+### Subtask g): Visualize estimated P-Spline
+
+Now we make use of the fact that we tracked the value of the location. We can 
+easily access summary statistics from the summary object.
+
+```{python}
+loc = summary.quantities["mean"]["loc"]
+loc_hdi = summary.quantities["hdi"]["loc"]
+
+loc_hdi_lo = loc_hdi[0,:]
+loc_hdi_hi = loc_hdi[1,:]
+```
+
+For plotting, we again use `plotnine`. 
+
+```{python}
+(
+  ggplot()
+  + aes(x = mcycle.times)
+  + geom_point(aes(y = mcycle.accel))
+  + geom_line(aes(y = loc))
+  + geom_ribbon(aes(ymin = loc_hdi_lo, ymax = loc_hdi_hi), alpha = 0.2)
+)
+```
+
+
+## Exercise 3: Distributional regression with  `{rliesel}`
+
+
+### Subtask a): Model setup
+
+Model setup works similar - we just have to additionally define a covariate
+model for the scale now.
+
+```{{r}}
+model <- liesel(
+  response = mcycle$accel,
+  distribution = "Normal",
+  predictors = list(
+    loc = predictor(~s(times, bs = "ps", k = 20), inverse_link = "Identity"),
+    scale = predictor(~s(times, bs = "ps", k = 20), inverse_link = "Exp")
+  ),
+  data = mcycle
+)
+```
+
+```{{python}}
+#| include: false
+#| echo: false
+model = r.model
+lsl.save_model(model, "ex3-model.pickle")
+```
+
+For Python-only participants, we load the model from the public
+repository.
+
+```{python}
+model = dill.load(urlopen("https://s.gwdg.de/exn3LQ"))
+```
+
+### Subtask b): Plot your model
+
+```{python}
+lsl.plot_vars(model, save_path="img/locscale.png")
+```
+
+### Subtasks c), d): Set up engine builder, sample and inspect
+
+Like before, we can quickly set up the sampling scheme with our little helper
+`lsl.dist_reg_mcmc`:
+
+```{python}
+engine_builder = lsl.dist_reg_mcmc(model, seed=11, num_chains=4)
+
+engine_builder.set_duration(warmup_duration=1000, posterior_duration=1000)
+engine_builder.positions_included += ["loc", "scale"]
+```
+
+There's one tricky bit here: the default jittering, which adds 
+uniformly distributed random noise $u \sim \mathcal{U}(-2, 2)$ to the starting
+values,
+is too aggressive
+for the for scale regression 
+coefficients. So we have to override the a manual jittering with a more
+subtle version.
+
+```{python}
+import jax
+
+def jitter_scale_coefs(key, coef):
+   jittering = jax.random.uniform(
+     key, coef.shape, minval=-0.1, maxval=0.1
+   )
+   return coef + jittering
+
+engine_builder.set_jitter_fns({"scale_np0_beta": jitter_scale_coefs})
+```
+
+Now we can sample successfully:
+
+```{python}
+#| cache: true
+engine = engine_builder.build()
+engine.sample_all_epochs()
+results = engine.get_results()
+summary = gs.Summary(results)
+```
+
+```{python}
+print(summary.to_dataframe())
+print(summary.error_df())
+```
+
+### Subtask e): Plot results for mean function
+
+And go on to plot our results:
+
+```{python}
+loc = summary.quantities["mean"]["loc"]
+loc_hdi = summary.quantities["hdi"]["loc"]
+
+loc_hdi_lo = loc_hdi[0,:]
+loc_hdi_hi = loc_hdi[1,:]
+```
+
+```{python}
+(
+  ggplot()
+  + aes(x = mcycle.times)
+  + geom_point(aes(y = mcycle.accel))
+  + geom_line(aes(y = loc))
+  + geom_ribbon(aes(ymin = loc_hdi_lo, ymax = loc_hdi_hi), alpha = 0.2, fill = "blue")
+  + labs(title = "Shaded: HDI for mean function")
+)
+```
+
+### Subtask f): Plot results for scale function
+
+```{python}
+scale = summary.quantities["mean"]["scale"]
+scale_hdi = summary.quantities["hdi"]["scale"]
+
+scale_hdi_lo = scale_hdi[0,:]
+scale_hdi_hi = scale_hdi[1,:]
+```
+
+We can use the scale estimate to display one standard deviation around the mean
+estimate:
+
+
+```{python}
+(
+  ggplot()
+  + aes(x = mcycle.times)
+  + geom_point(aes(y = mcycle.accel))
+  + geom_line(aes(y = loc))
+  + geom_ribbon(aes(ymin = loc - scale, ymax = loc + scale), alpha = 0.2, fill = "red")
+  + labs(title = "Shaded: +- 1 SD around mean function")
+)
+```
+
+Or we can plot the scale directly as a function of our covariate, including
+uncertainty visualization with highest posterior density intervals:
+
+```{python}
+(
+  ggplot()
+  + aes(x = mcycle.times)
+  + geom_line(aes(y = scale))
+  + geom_ribbon(aes(ymin = scale_hdi_lo, ymax = scale_hdi_hi), alpha = 0.2, fill = "blue")
+  + labs(title = "Scale function. Shaded: HDI for scale function")
+)
+```
+
+
+## Exercise 4: Recover the statistical model for the scale
+
+Let's load the model again and plot the graph.
+
+```{python}
+model = dill.load(urlopen("https://s.gwdg.de/un4W29"))
+lsl.plot_vars(model)
+```
+
+Information from the graph:
+
+- `"scale_p0"` is the only term in the scale predictor.
+- It has the inputs `"scale_p0_X"` and `"scale_p0_beta"`.
+
+Let's look at these variables:
+
+```{python}
+model.vars["scale_p0_X"].value
+model.vars["scale_p0_beta"].value
+model.vars["scale_p0_beta"].value.shape
+```
+
+- The variable `"scale_p0_X"` is just a one-column matrix of ones, looking like
+   the intercept-column of a design matrix.
+- The variable `"scale_p0_beta"` is a scalar parameter.
+
+Now how do the values enter `"scale_p0"`? 
+
+```{python}
+model.vars["scale_p0"].weak
+```
+
+The variable `"scale_p0"` is weak, so we can assume that it wraps a calculator.
+We can access the calculator through the `lsl.Var.value_node` attribute. Then,
+we can access the function wrapped by the calculator through the 
+`lsl.Calc.function` attribute. Python's `inspect.getsource()` function allows
+us to print the code that defined this function.
+
+```{python}
+import inspect
+
+inspect.getsource(model.vars["scale_p0"].value_node.function)
+```
+
+We can thus see that we have a model of the form:
+$$
+\bseta_{\sigma} = \bfX_{\sigma} \bsbeta_{\sigma},
+$$
+where $\bfX_{\sigma} = \bfone$ and $\bsbeta_{\sigma} = \beta_{\sigma}$. Since we
+have specified the exponential function as the inverse link function in our
+call to `rliesel::liesel`, we now know that we have
+$$
+\sigma = \exp(\eta_{\sigma}) = \exp(\beta_\sigma),
+$$
+so $\beta_\sigma$ in our model, represented by the variable
+`"scale_p0_beta"`, is the logarithm of the scale. Note that we have switched
+back to scalar notation here, because the model assumes a constant scale.
+
+Now what is the prior that `rliesel` assigned for us? Let's take a closer look
+at the `"scale_p0_beta"` variable and its `lsl.Var.dist_node` attribute:
+```{python}
+model.vars["scale_p0_beta"].dist_node
+model.vars["scale_p0_beta"].dist_node.distribution
+model.vars["scale_p0_beta"].dist_node.distribution.__name__
+```
+This tells us: $\beta_\sigma$ has a normal prior. Now what are the location and
+scale of this prior? We can get this insight through the `lsl.Node.kwinputs`
+attribute:
+```{python}
+model.vars["scale_p0_beta"].dist_node.kwinputs
+model.vars["scale_p0_beta"].dist_node.kwinputs["loc"].value
+model.vars["scale_p0_beta"].dist_node.kwinputs["scale"].value
+```
+So we know now that the prior is specified as
+$$
+\beta_\sigma \sim \mathcal{N}\bigl(0, 100^2\bigr),
+$$
+which makes the prior for $\sigma$ 
+$$
+\sigma \sim \text{Lognormal}\bigl(0, 100^2\bigr).
+$$
