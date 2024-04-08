@@ -389,6 +389,8 @@ gb.plot_vars()
 Here, we apply the knowledge from Exercise Sheet 01.
 
 ```{python}
+import liesel.goose as gs
+
 model = gb.build_model()
 interface = gs.LieselInterface(model)
 
