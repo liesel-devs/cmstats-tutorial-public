@@ -161,3 +161,5 @@ cython_debug/
 
 # Mac
 .DS_Store
+.Rproj.user
+.vscode/settings.json
